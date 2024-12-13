@@ -38,9 +38,7 @@ stable_baselines3==2.4.0
 sympy==1.13.1
 tensorboard==2.18.0
 tensorboard-data-server==0.7.2
-torch==2.0.1+cu117
-torchaudio==2.0.2+cu117
-torchvision==0.15.2+cu117
+torch==2.5.1+cu118
 typing_extensions==4.12.2
 tzdata==2024.2
 urllib3==1.26.13

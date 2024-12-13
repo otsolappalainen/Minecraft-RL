@@ -36,9 +36,12 @@ device = th.device("cuda" if th.cuda.is_available() else "cpu")     # Use GPU if
 RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 BASE_DIR = Path(__file__).parent.parent                    # Go up one level from the script location
 MODELS_DIR = BASE_DIR / "models"
-PPO_MODELS_DIR = MODELS_DIR / "ppo" / "v5"
-LOG_DIR_BASE = BASE_DIR / "logs" / "tensorboard" / "ppo_v5"
+#PPO_MODELS_DIR = MODELS_DIR / "ppo" / "v5"
 
+LOG_DIR_BASE = BASE_DIR / "logs" / "tensorboard" / "ppo_v5"
+#PPO_MODELS_DIR = r"E:\PPO_BC_MODELS\models_ppo_v5"
+PPO_MODELS_DIR = Path(r"E:\PPO_BC_MODELS\models_ppo_v5")
+MODEL_PATH_PPO = str(PPO_MODELS_DIR) 
 
 # Replace the original paths
 MODEL_PATH_PPO = str(PPO_MODELS_DIR)     # Convert to string for compatibility
@@ -53,10 +56,10 @@ Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 
 # Training configuration
 TOTAL_TIMESTEPS = 5_000_000     # Total timesteps. LR and Entropy coefficient will be scheduled based on this.
-LEARNING_RATE = 1e-5            # Initial learning rate
+LEARNING_RATE = 1e-6            # Initial learning rate
 N_STEPS = 2048                  
 BATCH_SIZE = 512
-N_EPOCHS = 5
+N_EPOCHS = 10
 GAMMA = 0.99
 EVAL_FREQ = 4096
 EVAL_EPISODES = 1
@@ -64,12 +67,12 @@ SAVE_EVERY_STEPS = 10000
 GAE_LAMBDA = 0.95
 CLIP_RANGE = 0.2
 CLIP_RANGE_VF = None
-ENT_COEF = 0.01       # Initial entropy coefficient
+ENT_COEF = 0.02       # Initial entropy coefficient
 VF_COEF = 0.5
 MAX_GRAD_NORM = 0.5
 USE_SDE = False
 SDE_SAMPLE_FREQ = -1
-TARGET_KL = 0.01
+TARGET_KL = 0.005
 VERBOSE = 1
 SEED = None
 
@@ -469,6 +472,7 @@ class SaveOnStepCallback(BaseCallback):
 def main():
     # Initialize environments
     minecraft_windows = find_minecraft_windows()
+    print(f"device: {device}")
     
     train_env_fns = [make_env(i, minecraft_windows=minecraft_windows) 
                      for i in range(PARALLEL_ENVS)]
