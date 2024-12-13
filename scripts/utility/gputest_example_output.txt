@@ -1,0 +1,24 @@
+=== Core ML Libraries ===
+NumPy: 1.26.4
+PyTorch: 2.0.1+cu117
+
+=== CUDA Information ===
+CUDA Available: Yes
+CUDA Version: 11.7
+GPU Count: 1
+GPU Name: NVIDIA GeForce RTX 3070
+
+=== RL Libraries ===
+Gymnasium: 1.0.0
+Stable-Baselines3: 2.4.0
+
+=== Image Processing ===
+OpenCV: 4.10.0
+MSS: 10.0.0
+
+=== System Libraries ===
+PyGetWindow: 0.0.9
+WebSockets: 14.1
+
+=== System Dependencies ===
+Java: openjdk version "21.0.5" 2024-10-15 LTS

@@ -1,0 +1,33 @@
+# Ignore Python cache files
+*.pyc
+__pycache__/
+fresh-repo/
+
+# Ignore data and log files
+*.pkl
+*.npy
+*.csv
+logs/
+data/
+scripts/full_ai/ppo_minecraft_tensorboard/
+*.tfevents.*
+*.npz
+*.jsonl
+*.json
+models/
+
+# Ignore virtual environments
+.venv/
+.vscode/
+
+# Ignore model and checkpoint files
+*.pth
+*.zip
+*.dll
+*.pyd
+*.mp4
+*.pt
+*.pkl
+
+# Ignore images
+*.png
