@@ -16,6 +16,7 @@ import uuid
 from collections import deque
 import math
 from threading import Lock
+import concurrent.futures
 
 
 # Training settings
@@ -139,9 +140,7 @@ class MinecraftEnv(gym.Env):
         # Start WebSocket connection in a separate thread
         self.start_connection()
 
-        # Initialize task with height targets
-        self.default_task = self.normalize_task({})
-        self.task = self.default_task if task is None else np.array(task, dtype=np.float32)
+        
 
         # Initialize step counters and parameters
         self.steps = 0
@@ -166,6 +165,8 @@ class MinecraftEnv(gym.Env):
         self.block_break_history = deque(maxlen=30)
         self.recent_block_breaks = deque(maxlen=20)  # Track block breaks in last 20 steps
         self.prev_break_progress = 0.0
+
+        self.last_screenshot = None
 
 
     def start_connection(self):

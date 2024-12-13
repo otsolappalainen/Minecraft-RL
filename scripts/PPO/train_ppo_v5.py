@@ -26,7 +26,7 @@ from pathlib import Path
 
 
 # System configuration
-PARALLEL_ENVS = 8          # Number of parallel TRAINING environments. 1 additional environment will be used for evaluation. So total environments = PARALLEL_ENVS + 1
+PARALLEL_ENVS = 11          # Number of parallel TRAINING environments. 1 additional environment will be used for evaluation. So total environments = PARALLEL_ENVS + 1
 WINDOW_CROP_SIZE = 240     # Size of the captured image from each window. The model will currently train on half of this size.
 MOVEMENT_DETECTION_THRESHOLD = 5       # Used in mapping windows to URIs. Lower values are more sensitive to movement, but might assign wrong URIs.
 device = th.device("cuda" if th.cuda.is_available() else "cpu")     # Use GPU if available
