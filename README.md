@@ -5,14 +5,14 @@ A deep reinforcement learning system that trains an AI agent to play Minecraft u
 ## System Overview
 
 ### Components
-1. **Minecraft Mod** ([minecraft_client](http://_vscodecontentref_/1))
+1. **Minecraft Mod** ([minecraft_client](./minecraft_client))
    - WebSocket server for receiving commands
    - Action execution in game
    - State observation and transmission
    - Block breaking event handling
    - Player state management
 
-2. **Training System** ([PPO](http://_vscodecontentref_/2))
+2. **Training System** ([PPO](./scripts/PPO))
    - PPO implementation
    - Parallel environment management
    - Screenshot processing
@@ -43,8 +43,8 @@ A deep reinforcement learning system that trains an AI agent to play Minecraft u
 
 1. **Setup Minecraft**
    - Install Minecraft with Fabric
-   - Copy mod from [minecraft_client](http://_vscodecontentref_/4) to mods folder
-   - Launch 9 Minecraft instances (8 training + 1 eval)
+   - Build the fabric example mod with this client code ([minecraft_client](./minecraft_client))
+   - Launch multiple Minecraft instances (8 training + 1 eval)
 
 2. **Setup Python**
 
