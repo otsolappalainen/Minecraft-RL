@@ -26,12 +26,6 @@ A deep reinforcement learning system that trains an AI agent to play Minecraft u
 - Fabric Mod Loader
 - Java JDK 21+
 
-### Python Environment
-
-    python -m venv .venv
-    .venv\Scripts\activate
-    pip install -r [requirements.txt](http://_vscodecontentref_/3)
-
 ### Key Dependencies
 - PyTorch 2.0.1+cu117 (CUDA 11.7)
 - Stable-Baselines3 2.4.0
@@ -50,7 +44,7 @@ A deep reinforcement learning system that trains an AI agent to play Minecraft u
 
         python -m venv .venv
         .venv\Scripts\activate
-        pip install -r [requirements.txt](http://_vscodecontentref_/5)
+        pip install -r requirements.txt
 
 3. **Start Training**
 
