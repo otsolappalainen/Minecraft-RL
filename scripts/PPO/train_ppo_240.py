@@ -31,7 +31,7 @@ from tkinter import filedialog
 
 
 # System configuration
-PARALLEL_ENVS = 8          # Number of parallel TRAINING environments. 1 additional environment will be used for evaluation. So total environments = PARALLEL_ENVS + 1
+PARALLEL_ENVS = 11          # Number of parallel TRAINING environments. 1 additional environment will be used for evaluation. So total environments = PARALLEL_ENVS + 1
 WINDOW_CROP_WIDTH = 240
 WINDOW_CROP_HEIGHT = 120   # Size of the captured image from each window. The model will currently train on half of this size.
 MOVEMENT_DETECTION_THRESHOLD = 5       # shouldnt be needed anymore.
@@ -62,10 +62,10 @@ Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 
 # Training configuration
 TOTAL_TIMESTEPS = 5_000_000     # Total timesteps. LR and Entropy coefficient will be scheduled based on this.
-LEARNING_RATE = 1e-4            # Initial learning rate
-N_STEPS = 2048                 
-BATCH_SIZE = 512
-N_EPOCHS = 5
+LEARNING_RATE = 5e-5            # Initial learning rate
+N_STEPS = 1024             
+BATCH_SIZE = 128
+N_EPOCHS = 10
 GAMMA = 0.99
 EVAL_FREQ = 8192
 EVAL_EPISODES = 1
@@ -73,7 +73,7 @@ SAVE_EVERY_STEPS = 20000
 GAE_LAMBDA = 0.95
 CLIP_RANGE = 0.2
 CLIP_RANGE_VF = None
-ENT_COEF = 0.03       # Initial entropy coefficient
+ENT_COEF = 0.01       # Initial entropy coefficient
 VF_COEF = 0.5
 MAX_GRAD_NORM = 0.5
 USE_SDE = False
@@ -116,18 +116,29 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space, features_dim=512):
         super().__init__(observation_space, features_dim)
 
-        # CNN for image processing (3x240x240 input)
+        
         self.img_head = nn.Sequential(
-            nn.Conv2d(in_channels=3, out_channels=16, kernel_size=4, stride=2),    # 240x240 -> 119x119
+            # Initial layers
+            nn.Conv2d(in_channels=3, out_channels=16, kernel_size=5, stride=1, padding=2),
             nn.LeakyReLU(inplace=True),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),   # 119x119 -> 58x58
-            nn.LeakyReLU(inplace=True), 
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2),   # 58x58 -> 28x28
+            nn.Conv2d(in_channels=16, out_channels=16, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(inplace=True),
-            nn.Conv2d(in_channels=64, out_channels=32, kernel_size=3, stride=1),   # 28x28 -> 26x26
+
+            # First downsampling
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(inplace=True),
+            
+            # Second downsampling
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(inplace=True),
+            
+            # Final downsampling
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=4, stride=2, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.Flatten()
         )
+
+
         # Calculate CNN output size
         with th.no_grad():
             sample_input = th.zeros(1, 3, 120, 240)
@@ -135,8 +146,8 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
             self.cnn_features = cnn_output.shape[1]
 
         self.image_fusion = nn.Sequential(
-            nn.Linear(self.cnn_features, 512),
-            nn.ReLU(),
+            nn.Linear(self.cnn_features, 256),
+            nn.ReLU(inplace=True),
         )
 
 
@@ -150,7 +161,7 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
 
         # Simplified surrounding blocks processing
         self.surrounding_fusion = nn.Sequential(
-            nn.Linear(12, 64),  # 12 directional values -> 64 features
+            nn.Linear(12, 128),  # 12 directional values -> 64 features
             nn.ReLU(inplace=True),
         )
 
@@ -161,7 +172,7 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
 
         # Final fusion (adjusted for new dimensions)
         self.fusion = nn.Sequential(
-            nn.Linear(512 + 64 + 128, features_dim),  # Updated input size
+            nn.Linear(256 + 128 + 128, features_dim),  # Updated input size
             nn.ReLU(inplace=True),
         )
 
@@ -557,14 +568,14 @@ def main_training_loop():
                            for i in range(actual_parallel_envs)]
             train_env = SubprocVecEnv(train_env_fns)
             train_env = VecMonitor(train_env)
-            train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, 
-                                   clip_obs=10.0)
+            #train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, 
+            #                       clip_obs=10.0)
             
             eval_env_fn = [make_env(0, is_eval=True, minecraft_windows=minecraft_windows)]
             eval_env = SubprocVecEnv(eval_env_fn)
             eval_env = VecMonitor(eval_env)
-            eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, 
-                                  clip_obs=10.0, training=False)
+            #eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, 
+            #                      clip_obs=10.0, training=False)
 
             # Load latest model or create new
             model_path, new_training, source_weights = select_training_mode(MODEL_PATH_PPO)
