@@ -36,14 +36,12 @@ SURROUNDING_BLOCKS_DIM = 12
 
 # Preallocate default states to avoid repeated np.zeros calls
 DEFAULT_IMAGE = np.zeros(IMAGE_SHAPE, dtype=np.float32)
-DEFAULT_BLOCKS = np.zeros(4, dtype=np.float32)
-DEFAULT_HAND = np.zeros(5, dtype=np.float32)
-DEFAULT_MOBS = np.zeros(3, dtype=np.float32)
+DEFAULT_HAND = np.zeros(2, dtype=np.float32)
+DEFAULT_MOBS = np.zeros(2, dtype=np.float32)
 DEFAULT_SURROUNDING = np.zeros(SURROUNDING_BLOCKS_DIM, dtype=np.float32)
-DEFAULT_PLAYER_STATE = np.zeros(8, dtype=np.float32)  # [x,y,z,yaw,pitch,health,alive,light]
+DEFAULT_PLAYER_STATE = np.zeros(9, dtype=np.float32)  # [x,y,z,yaw,pitch,health,alive,light]
 DEFAULT_STATE = {
     'image': DEFAULT_IMAGE,
-    'blocks': DEFAULT_BLOCKS,
     'hand': DEFAULT_HAND,
     'mobs': DEFAULT_MOBS,
     'surrounding_blocks': DEFAULT_SURROUNDING,
@@ -81,14 +79,12 @@ class MinecraftEnv(gym.Env):
         }
         self.action_space = spaces.Discrete(len(self.ACTION_MAPPING))
 
-        blocks_dim = 4
-        hand_dim = 5
-        mobs_dim = 3
-        player_state_dim = 8
+        hand_dim = 2
+        mobs_dim = 2
+        player_state_dim = 9
 
         self.observation_space = spaces.Dict({
             'image': spaces.Box(low=0, high=1, shape=IMAGE_SHAPE, dtype=np.float32),
-            'blocks': spaces.Box(low=0, high=1, shape=(blocks_dim,), dtype=np.float32),
             'hand': spaces.Box(low=0, high=1, shape=(hand_dim,), dtype=np.float32),
             'mobs': spaces.Box(low=0, high=1, shape=(mobs_dim,), dtype=np.float32),
             'surrounding_blocks': spaces.Box(low=0, high=1, shape=(SURROUNDING_BLOCKS_DIM,), dtype=np.float32),
@@ -196,32 +192,15 @@ class MinecraftEnv(gym.Env):
     def _get_default_state(self):
         return DEFAULT_STATE
 
-    def normalize_blocks(self, broken_blocks):
-        block_features = 4
-        if isinstance(broken_blocks, list) and len(broken_blocks) > 0 and isinstance(broken_blocks[0], list):
-            broken_blocks = broken_blocks[0]
-        if isinstance(broken_blocks, list):
-            arr = np.array(broken_blocks[:block_features], dtype=np.float32)
-        else:
-            arr = broken_blocks
-        result = np.zeros(block_features, dtype=np.float32)
-        length = min(len(arr), block_features)
-        result[:length] = arr[:length]
-        return np.clip(result, 0.0, 1.0)
-
     def normalize_hand(self, state):
-        hand_dim = 5
-        held_item = state.get('held_item', [0]*hand_dim)
-        if isinstance(held_item, list):
-            held_item = np.array(held_item[:hand_dim], dtype=np.float32)
-        result = np.zeros(hand_dim, dtype=np.float32)
-        length = min(len(held_item), hand_dim)
-        result[:length] = held_item[:length]
-        return np.clip(result, 0.0, 1.0)
+        # Provide 2 constant values
+        return np.array([0.8, 0.0], dtype=np.float32)
 
+    # Update normalize_mobs to handle 2 values and get hit result separately
     def normalize_mobs(self, state):
-        mobs = state.get('mobs', [0.0,0.0,0.0])
-        return np.array(mobs, dtype=np.float32)
+        mobs = state.get('mobs', [0.0, 0.0])  # Now only 2 values
+        hit_result = state.get('results', [0.0])[0]  # Get hit result from results array
+        return np.array(mobs, dtype=np.float32), hit_result
 
     def flatten_surrounding_blocks(self, state):
         surrounding = state.get('surrounding_blocks', [])
@@ -287,21 +266,21 @@ class MinecraftEnv(gym.Env):
         self.total_step_penalty += STEP_PENALTY
 
         if state is not None:
-            broken_blocks = state.get('broken_blocks', [0,0,0,0])
-            blocks_norm = self.normalize_blocks(broken_blocks)
             hand_norm = self.normalize_hand(state)
-            mobs_norm = self.normalize_mobs(state)
+            mobs_norm, hit_result = self.normalize_mobs(state)
             surrounding_blocks_norm = self.flatten_surrounding_blocks(state)
 
             x = state.get('x',0.0)
             y = state.get('y',0.0)
             z = state.get('z',0.0)
             yaw = state.get('yaw',0.0)
+            syaw = np.sin(yaw)
+            cyaw = np.cos(yaw)
             pitch = state.get('pitch',0.0)
             health = state.get('health',1.0)
             alive = state.get('alive',True)
             light_level = state.get('light_level',0)
-            player_state = np.array([x,y,z,yaw,pitch,health,1.0 if alive else 0.0,light_level], dtype=np.float32)
+            player_state = np.array([x,y,z,syaw,cyaw,pitch,health,1.0 if alive else 0.0,light_level], dtype=np.float32)
 
             if not hasattr(self, 'previous_health'):
                 self.previous_health = health
@@ -359,7 +338,7 @@ class MinecraftEnv(gym.Env):
                 self.total_position_reward += 0.05
 
             # Reward for successfull hit confirmed by the game
-            if mobs_norm[1] > 0.0:
+            if hit_result > 0.0:
                 reward += 2.0
                 self.total_hit_reward += 2.0
 
@@ -376,7 +355,6 @@ class MinecraftEnv(gym.Env):
 
             state_data = {
                 'image': screenshot,
-                'blocks': blocks_norm,
                 'hand': hand_norm,
                 'mobs': mobs_norm,
                 'surrounding_blocks': surrounding_blocks_norm,
@@ -444,24 +422,24 @@ class MinecraftEnv(gym.Env):
                 screenshot = DEFAULT_IMAGE
 
             if state is not None:
-                blocks_norm = self.normalize_blocks(state.get('broken_blocks',[0,0,0,0]))
                 hand_norm = self.normalize_hand(state)
-                mobs_norm = self.normalize_mobs(state)
+                mobs_norm, _ = self.normalize_mobs(state)  # We don't need hit result during reset
                 surr_norm = self.flatten_surrounding_blocks(state)
 
                 x = state.get('x',0.0)
                 y = state.get('y',0.0)
                 z = state.get('z',0.0)
                 yaw = state.get('yaw',0.0)
+                syaw = np.sin(yaw)
+                cyaw = np.cos(yaw)
                 pitch = state.get('pitch',0.0)
                 health = state.get('health',20.0)
                 alive = state.get('alive',True)
                 light_level = state.get('light_level',0)
 
-                player_state = np.array([x,y,z,yaw,pitch,health,1.0 if alive else 0.0,light_level], dtype=np.float32)
+                player_state = np.array([x,y,z,syaw,cyaw,pitch,health,1.0 if alive else 0.0,light_level], dtype=np.float32)
                 state_data = {
                     'image': screenshot,
-                    'blocks': blocks_norm,
                     'hand': hand_norm,
                     'mobs': mobs_norm,
                     'surrounding_blocks': surr_norm,

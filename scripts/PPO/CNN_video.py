@@ -13,14 +13,15 @@ import cv2
 from pathlib import Path
 import re
 
-# Update VIDEO_CONFIG
+# Update VIDEO_CONFIG with better codec settings
 VIDEO_CONFIG = {
-    'FPS': 15,
-    'INPUT_HEIGHT': 120,
-    'INPUT_WIDTH': 240,
-    'OUTPUT_HEIGHT': 480,  # 4x input height
-    'OUTPUT_WIDTH': 960,   # 4x input width
-    'CODEC': 'mp4v',
+    "FPS": 15,
+    "INPUT_HEIGHT": 120,
+    "INPUT_WIDTH": 240,
+    "OUTPUT_HEIGHT": 480,
+    "OUTPUT_WIDTH": 960,
+    "CODEC": "mp4v",  # Changed from avc1 to more widely supported mp4v
+    "BITRATE": "5000k"
 }
 
 def remove_alpha_channel(image):
@@ -30,25 +31,6 @@ def remove_alpha_channel(image):
         return background
     return image
 
-def compute_mean_std(image_dir, transform):
-    mean = 0.0
-    std = 0.0
-    count = 0
-    for img_name in os.listdir(image_dir):
-        if img_name.lower().endswith(('.png', '.jpg', '.jpeg')):
-            img_path = os.path.join(image_dir, img_name)
-            image = Image.open(img_path)
-            image = remove_alpha_channel(image)
-            image = transform(image)
-            image = image.unsqueeze(0)
-            mean += image.mean([0, 2, 3])
-            std += image.std([0, 2, 3])
-            count += 1
-    if count == 0:
-        raise ValueError(f"No images found in {image_dir}")
-    mean /= count
-    std /= count
-    return mean.tolist(), std.tolist()
 
 def get_model_path():
     PPO_MODELS_DIR = Path(r"E:\PPO_BC_MODELS\models_ppo_240")
@@ -88,21 +70,10 @@ class CNNVisualizer:
         self.cnn = model.policy.features_extractor.img_head.to(self.device)
         self.cnn.eval()
         
-        # Setup transforms
+        # Simple transform matching env normalization
         self.transform = transforms.Compose([
             transforms.Resize((VIDEO_CONFIG['INPUT_HEIGHT'], VIDEO_CONFIG['INPUT_WIDTH'])),
-            transforms.ToTensor(),
-        ])
-        
-        print("Computing normalization parameters...")
-        self.mean, self.std = compute_mean_std(image_dir, self.transform)
-        print(f"Mean: {self.mean}")
-        print(f"Std: {self.std}")
-        
-        self.transform = transforms.Compose([
-            transforms.Resize((VIDEO_CONFIG['INPUT_HEIGHT'], VIDEO_CONFIG['INPUT_WIDTH'])),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=self.mean, std=self.std),
+            transforms.ToTensor(),  # This divides by 255 automatically
         ])
 
     def get_feature_maps(self, image_path):
@@ -252,67 +223,92 @@ class CNNVisualizer:
         plt.close()
 
 def process_batch(visualizer, image_files):
-    """Process all images at original resolution and store results"""
+    """Process all images and find global min/max for normalization"""
     results = []
     total = len(image_files)
+    global_min = float('inf')
+    global_max = float('-inf')
     
+    # First pass - collect data and find global min/max
     for idx, img_path in enumerate(image_files, 1):
         print(f"\rProcessing image {idx}/{total}", end="")
         
-        # Load and preprocess original image
         original = Image.open(img_path)
         original = remove_alpha_channel(original)
         original = np.array(original)
         
-        # Get feature maps and activations
         activations = visualizer.get_feature_maps(str(img_path))
         if activations is None:
             continue
             
-        # Create heatmap at original resolution
         final_layer = activations[-1]
         heatmap = final_layer.mean(dim=1)[0].cpu().numpy()
-        heatmap = cv2.normalize(heatmap, None, 0, 255, cv2.NORM_MINMAX)
+        
+        # Update global min/max
+        global_min = min(global_min, heatmap.min())
+        global_max = max(global_max, heatmap.max())
         
         results.append({
             'original': original,
             'activations': activations,
-            'heatmap': heatmap,
+            'heatmap': heatmap,  # Store raw values
             'path': img_path
         })
     
     print("\nBatch processing complete!")
-    return results
+    return results, global_min, global_max
 
-def create_side_by_side_video(results, save_path, config=VIDEO_CONFIG):
+# Modify create_side_by_side_video function
+def create_side_by_side_video(results, save_path, config=VIDEO_CONFIG, global_min=None, global_max=None):
     output_height = config['OUTPUT_HEIGHT']
     output_width = config['OUTPUT_WIDTH']
     
-    fourcc = cv2.VideoWriter_fourcc(*config['CODEC'])
-    out = cv2.VideoWriter(
-        str(save_path), 
-        fourcc, 
-        config['FPS'],
-        (output_width * 2, output_height),  # Double width for side-by-side
-        isColor=True
-    )
+    # Try different codec options in order of preference
+    codec_options = [
+        ('mp4v', '.mp4'),
+        ('XVID', '.avi'),
+        ('MJPG', '.avi')
+    ]
     
-    if not out.isOpened():
-        raise RuntimeError("Failed to initialize VideoWriter")
+    out = None
+    for codec, ext in codec_options:
+        try:
+            save_path = str(save_path).rsplit('.', 1)[0] + ext
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            out = cv2.VideoWriter(
+                save_path,
+                fourcc,
+                config['FPS'],
+                (output_width * 2, output_height),
+                isColor=True
+            )
+            if out.isOpened():
+                print(f"Successfully initialized video writer with codec: {codec}")
+                break
+        except Exception as e:
+            print(f"Failed to initialize codec {codec}: {e}")
+            continue
     
+    if out is None or not out.isOpened():
+        raise RuntimeError("Could not initialize any video codec")
+        
     for idx, result in enumerate(results, 1):
         print(f"\rCreating frame {idx}/{len(results)}", end="")
         
         # Resize maintaining aspect ratio
         original = cv2.resize(result['original'], 
                             (output_width, output_height), 
-                            interpolation=cv2.INTER_LANCZOS4)
+                            interpolation=cv2.INTER_NEAREST)
         original = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
         
-        # Upscale heatmap
-        heatmap = cv2.resize(result['heatmap'], (output_width, output_height), 
+        # Use global normalization
+        heatmap = result['heatmap']
+        heatmap = cv2.resize(heatmap, (output_width, output_height), 
                            interpolation=cv2.INTER_LANCZOS4)
-        heatmap = cv2.applyColorMap(heatmap.astype(np.uint8), cv2.COLORMAP_JET)
+        
+        # Scale to 0-255 using global min/max
+        heatmap = ((heatmap - global_min) / (global_max - global_min) * 255).astype(np.uint8)
+        heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
         
         # Blend heatmap with original
         overlay = cv2.addWeighted(original, 0.7, heatmap, 0.3, 0)
@@ -419,14 +415,14 @@ def main():
         image_files = sort_images_by_timestamp(image_dir)
         print(f"Found {len(image_files)} images")
         
-        # Process all images first
+        # Process all images first with global normalization
         print("Processing images...")
-        results = process_batch(visualizer, image_files)
+        results, global_min, global_max = process_batch(visualizer, image_files)
         
-        # Create side by side video
+        # Create side by side video with global normalization
         print("Creating side-by-side comparison video...")
         side_by_side_path = save_dir / "side_by_side.mp4"
-        create_side_by_side_video(results, side_by_side_path)
+        create_side_by_side_video(results, side_by_side_path, global_min=global_min, global_max=global_max)
         
         # Create feature map videos
         print("Creating feature map videos...")

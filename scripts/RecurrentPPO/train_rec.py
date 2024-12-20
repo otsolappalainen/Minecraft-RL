@@ -5,15 +5,17 @@ import datetime
 import numpy as np
 import torch as th
 import torch.nn as nn
-from stable_baselines3 import PPO
+# Changed import from stable_baselines3.PPO to sb3_contrib.RecurrentPPO
+from sb3_contrib import RecurrentPPO
+from sb3_contrib.common.recurrent.policies import RecurrentActorCriticPolicy
+
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.vec_env import VecNormalize
 import multiprocessing
 import logging
-from env_ppo_240 import MinecraftEnv
+from env_rec import MinecraftEnv
 import pygetwindow as gw
 import fnmatch
 import time
@@ -31,40 +33,28 @@ from tkinter import filedialog
 
 
 # System configuration
-PARALLEL_ENVS = 12          # Number of parallel TRAINING environments. 1 additional environment will be used for evaluation. So total environments = PARALLEL_ENVS + 1
+PARALLEL_ENVS = 12
 WINDOW_CROP_WIDTH = 240
-WINDOW_CROP_HEIGHT = 120   # Size of the captured image from each window. The model will currently train on half of this size.
-MOVEMENT_DETECTION_THRESHOLD = 5       # shouldnt be needed anymore.
-device = th.device("cuda" if th.cuda.is_available() else "cpu")     # Use GPU if available
+WINDOW_CROP_HEIGHT = 120
+MOVEMENT_DETECTION_THRESHOLD = 5
+device = th.device("cuda" if th.cuda.is_available() else "cpu")
 FREEZE_CNN_WEIGHTS = False
 
-
-# Filesystem configuration. Create uniqe subfolder for each run.
 RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-BASE_DIR = Path(__file__).parent.parent                    # Go up one level from the script location
+BASE_DIR = Path(__file__).parent.parent
 MODELS_DIR = BASE_DIR / "models"
-#PPO_MODELS_DIR = MODELS_DIR / "ppo" / "v5"
-
-LOG_DIR_BASE = BASE_DIR / "logs" / "tensorboard" / "ppo_v5_240"
-#PPO_MODELS_DIR = r"E:\PPO_BC_MODELS\models_ppo_v5"
-PPO_MODELS_DIR = Path(r"E:\PPO_BC_MODELS\models_ppo_240")
-MODEL_PATH_PPO = str(PPO_MODELS_DIR) 
-
-# Replace the original paths
-MODEL_PATH_PPO = str(PPO_MODELS_DIR)     # Convert to string for compatibility
+LOG_DIR_BASE = BASE_DIR / "logs" / "tensorboard" / "recurrent_ppo"
+PPO_MODELS_DIR = Path(r"E:\PPO_BC_MODELS\models_recurrent")
+MODEL_PATH_PPO = str(PPO_MODELS_DIR)
 LOG_DIR = str(LOG_DIR_BASE / f"run_{RUN_TIMESTAMP}")
 
-
-# Create necessary directories
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 PPO_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 
-
-# Training configuration
-TOTAL_TIMESTEPS = 5_000_000     # Total timesteps. LR and Entropy coefficient will be scheduled based on this.
-LEARNING_RATE = 1e-6            # Initial learning rate
-N_STEPS = 4096           
+TOTAL_TIMESTEPS = 5_000_000
+LEARNING_RATE = 1e-5
+N_STEPS = 4096
 BATCH_SIZE = 256
 N_EPOCHS = 5
 GAMMA = 0.99
@@ -74,69 +64,43 @@ SAVE_EVERY_STEPS = 20000
 GAE_LAMBDA = 0.95
 CLIP_RANGE = 0.2
 CLIP_RANGE_VF = None
-ENT_COEF = 0.01       # Initial entropy coefficient
+ENT_COEF = 0.02
 VF_COEF = 0.5
 MAX_GRAD_NORM = 0.5
 USE_SDE = False
 SDE_SAMPLE_FREQ = -1
-TARGET_KL = 0.01
+TARGET_KL = 0.05
 VERBOSE = 1
 SEED = None
 
-
-# Constants for schedulers
-MIN_LR = 1e-7              # Minimum learning rate
-MIN_ENT_COEF = 0.0005       # Minimum entropy coefficient
-DECAY_STEPS = 1_000_000      # Can be used instead of the total timesteps, if needed.
-
-
+MIN_LR = 1e-6
+MIN_ENT_COEF = 0.001
+DECAY_STEPS = 1_000_000
 
 def get_scheduled_lr(initial_lr, progress_remaining: float):
-    """Linear decay based on remaining progress"""
     decay_rate = -5 * (1 - progress_remaining)
     return max(MIN_LR, initial_lr * np.exp(decay_rate))
 
 def get_scheduled_ent_coef(initial_ent, progress_remaining: float):
-    """Exponential decay based on remaining progress""" 
     decay_rate = -5 * (1 - progress_remaining)
     return max(MIN_ENT_COEF, initial_ent * np.exp(decay_rate))
-
-
-
-#  Custom CNN + dense layer feature extractor for PPO. Combines image, scalar and matrix inputs.
-
-#  Input Shapes:
-#    - image: (B, 3, 120, 120) - RGB game view
-#    - surrounding_blocks: (B, X, Y, Z) - 3D matrix of block types
-#    - blocks: (B, N) - Current block states
-#    - hand: (B, 5) - Item in hand
-#    - target_block: (B, 3) - Target block info
-#    - player_state: (B, 8) - Position, rotation, health etc.
 
 class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space, features_dim=512):
         super().__init__(observation_space, features_dim)
 
-        
         self.img_head = nn.Sequential(
-            # Initial layers
             nn.Conv2d(in_channels=3, out_channels=16, kernel_size=5, stride=2, padding=2),
             nn.LeakyReLU(inplace=True),
             nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1),
             nn.LeakyReLU(inplace=True),
-
-            # First downsampling
             nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, padding=1),
             nn.LeakyReLU(inplace=True),
-            
-            # Second downsampling
             nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.Flatten()
         )
 
-
-        # Calculate CNN output size
         with th.no_grad():
             sample_input = th.zeros(1, 3, 120, 240)
             cnn_output = self.img_head(sample_input)
@@ -149,18 +113,14 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
             nn.ReLU(inplace=True),
         )
 
-
-        # Fusion network for all scalar inputs
         scalar_dim = (
-            observation_space.spaces["blocks"].shape[0] +  # blocks
-            observation_space.spaces["hand"].shape[0] +    # hand
-            observation_space.spaces["mobs"].shape[0] +  # target block
-            observation_space.spaces["player_state"].shape[0]  # player state
+            observation_space.spaces["hand"].shape[0] +
+            observation_space.spaces["mobs"].shape[0] +
+            observation_space.spaces["player_state"].shape[0]
         )
 
-        # Simplified surrounding blocks processing
         self.surrounding_fusion = nn.Sequential(
-            nn.Linear(12, 128),  # 12 directional values -> 64 features
+            nn.Linear(12, 128),
             nn.ReLU(inplace=True),
         )
 
@@ -169,59 +129,54 @@ class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
             nn.ReLU(inplace=True),
         )
 
-        # Final fusion (adjusted for new dimensions)
         self.fusion = nn.Sequential(
-            nn.Linear(256 + 128 + 128, features_dim),  # Updated input size
+            nn.Linear(256 + 128 + 128, features_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(features_dim, features_dim),  # Updated input size
+            nn.Linear(features_dim, features_dim),
             nn.ReLU(inplace=True),
         )
 
     def forward(self, observations):
-        # Process image through CNN and image fusion
         img_features = self.img_head(observations["image"])
         img_features = self.image_fusion(img_features)
 
-        # Process directional values
         surrounding_features = self.surrounding_fusion(
             observations["surrounding_blocks"]
         )
 
-        # Process scalar inputs
         scalar_input = th.cat([
-            observations["blocks"],
             observations["hand"],
             observations["mobs"],
             observations["player_state"]
         ], dim=1)
         scalar_features = self.scalar_fusion(scalar_input)
 
-        # Combine all features
         combined = th.cat([
             img_features,
             surrounding_features,
             scalar_features
         ], dim=1)
 
-        # Final fusion to output dimension
         return self.fusion(combined)
+
 
 def create_new_model(env):
     policy_kwargs = dict(
         features_extractor_class=CustomCNNFeatureExtractor,
         features_extractor_kwargs=dict(features_dim=512),
-        net_arch=[1024, 1024]
+        net_arch=[1024, 1024],
+        lstm_hidden_size=512,  # This defines the LSTM memory size
+        n_lstm_layers=1        # (optional) number of LSTM layers
     )
 
-    # Learning rate scheduler
     def scheduled_lr(step):
         return get_scheduled_lr(LEARNING_RATE, step)
 
-    # Initial entropy coefficient will be scheduled by callback
     initial_ent_coef = ENT_COEF
 
-    model = PPO(
-        policy=ActorCriticPolicy,
+    # Key Change: Use RecurrentPPO and RecurrentActorCriticPolicy
+    model = RecurrentPPO(
+        policy=RecurrentActorCriticPolicy,
         env=env,
         learning_rate=scheduled_lr,
         n_steps=N_STEPS,
@@ -231,7 +186,7 @@ def create_new_model(env):
         gae_lambda=GAE_LAMBDA,
         clip_range=CLIP_RANGE,
         clip_range_vf=CLIP_RANGE_VF,
-        ent_coef=initial_ent_coef,  # Initial value that will be scheduled
+        ent_coef=initial_ent_coef,
         vf_coef=VF_COEF,
         max_grad_norm=MAX_GRAD_NORM,
         tensorboard_log=LOG_DIR,
@@ -248,32 +203,21 @@ def create_new_model(env):
 
     return model
 
-# Simple callback for entropy coefficient scheduling
+
 class EntCoefScheduleCallback(BaseCallback):
     def __init__(self, initial_ent_coef):
         super().__init__()
         self.initial_ent_coef = initial_ent_coef
 
     def _on_step(self) -> bool:
-        # Calculate progress remaining (1.0 -> 0.0)
         progress_remaining = 1.0 - (self.num_timesteps / TOTAL_TIMESTEPS)
-        
-        # Update entropy coefficient
-        new_ent_coef = get_scheduled_ent_coef(
-            self.initial_ent_coef,
-            progress_remaining
-        )
+        new_ent_coef = get_scheduled_ent_coef(self.initial_ent_coef, progress_remaining)
         self.model.ent_coef = new_ent_coef
-
-        # Log to tensorboard
         self.logger.record("train/ent_coef", new_ent_coef)
-        
         return True
-    
 
 
 def attempt_window_connection(port, retries=2):
-    """Try to connect to a window/server multiple times"""
     async def get_window_info(port):
         uri = f"ws://localhost:{port}"
         try:
@@ -313,22 +257,13 @@ def attempt_window_connection(port, retries=2):
     return None
 
 def find_available_windows():
-    """Find all available windows with retries"""
     print("\n=== Starting Minecraft Window Detection ===")
     windows = []
-    
-    # Try eval window first (port 8080)
-    #eval_window = attempt_window_connection(8080)
-    #if eval_window:
-    #    windows.append(eval_window)
-    
-    # Try training windows
     for i in range(PARALLEL_ENVS):
         port = 8080 + i
         window = attempt_window_connection(port)
         if window:
             windows.append(window)
-    
     print(f"\nFound {len(windows)} working windows")
     return windows
 
@@ -352,20 +287,20 @@ def make_env(rank, is_eval=False, minecraft_windows=None):
 def load_ppo_model(model_path, env, device):
     try:
         print(f"Loading model from {model_path}...")
-        new_model = create_new_model(env)  # This will handle freezing
-        old_model = PPO.load(model_path, env=env, device=device)
+        new_model = create_new_model(env)
+        # Load PPO weights directly into RecurrentPPO if compatible
+        # If not, you may need to do manual layer transfers
+        old_model = RecurrentPPO.load(model_path, env=env, device=device)
         new_model.policy.load_state_dict(old_model.policy.state_dict())
         
-        # Ensure CNN stays frozen even after loading weights
         if FREEZE_CNN_WEIGHTS:
             for param in new_model.policy.features_extractor.img_head.parameters():
                 param.requires_grad = False
-            
+
         return new_model
     except Exception as e:
         print(f"Error loading model: {e}")
         raise
-
 
 def get_latest_model(model_dir):
     models = [f for f in os.listdir(model_dir) if f.endswith('.zip')]
@@ -390,57 +325,50 @@ class SaveOnStepCallback(BaseCallback):
         return True
 
 def get_models_list(model_dir: str) -> list[str]:
-    """Get sorted list of model files"""
     models = [f for f in os.listdir(model_dir) if f.endswith('.zip')]
     return sorted(models, key=lambda x: os.path.getctime(os.path.join(model_dir, x)))
 
 def input_with_timeout(prompt: str, timeout: int = 60) -> Optional[str]:
-    """Get input with timeout, return None if no input"""
     print(prompt)
     print(f"Waiting {timeout} seconds for input...")
-    
+
     response = []
     start_time = time.time()
-    
+
     while True:
         if msvcrt.kbhit():
             char = msvcrt.getwche()
-            if char == '\r':  # Enter key
-                print()  # New line after input
+            if char == '\r':
+                print()
                 return ''.join(response)
-            elif char == '\b':  # Backspace
+            elif char == '\b':
                 if response:
                     response.pop()
-                    # Clear last character
                     print('\b \b', end='', flush=True)
             else:
                 response.append(char)
-        
+
         if time.time() - start_time > timeout:
             print("\nTimeout - using latest model")
             return None
-            
+
         time.sleep(0.1)
 
 def select_model(model_dir: str) -> str:
-    """Let user select a model or default to latest"""
     models = get_models_list(model_dir)
-    
     if not models:
         print("No models found in directory")
         return None
-        
-    # Print available models
+
     print("\nAvailable models:")
     for idx, model in enumerate(models, 1):
         print(f"{idx}. {model}")
-    
-    # Get user selection with timeout
+
     selection = input_with_timeout("\nEnter model number or press Enter for latest: ")
-    
+
     if selection is None or selection.strip() == "":
         return os.path.join(model_dir, models[-1])
-    
+
     try:
         idx = int(selection) - 1
         if 0 <= idx < len(models):
@@ -453,149 +381,153 @@ def select_model(model_dir: str) -> str:
         return os.path.join(model_dir, models[-1])
 
 def select_training_mode(model_dir: str) -> tuple[str, bool, str]:
-    """
-    Ask user for training mode:
-    1. Continue previous training
-    2. Start new training
-    3. Load weights from another model
-    
-    Returns:
-    - model_path: Path to model to load from (or None)
-    - new_training: Boolean indicating if this is new training
-    - source_weights: Path to source weights for option 3 (or None)
-    """
     print("\n=== Training Mode Selection ===")
     print("1. Continue previous training")
     print("2. Start new training from scratch")
     print("3. Load weights from another model (e.g., combat model)")
-    
+
     while True:
         choice = input("\nEnter your choice (1-3): ").strip()
-        
+
         if choice == "1":
-            # Continue previous training - use existing model selection
             model_path = select_model(model_dir)
             return model_path, False, None
-            
         elif choice == "2":
-            # Start fresh
             return None, True, None
-            
         elif choice == "3":
-            # Create hidden tkinter root window
             root = tk.Tk()
             root.withdraw()
-            
-            # Open file dialog
             print("\nPlease select the source model file (.zip)...")
             source_weights = filedialog.askopenfilename(
                 title="Select Source Model",
                 filetypes=[("ZIP files", "*.zip")],
                 initialdir=os.path.dirname(model_dir)
             )
-            
             if source_weights and os.path.exists(source_weights):
                 return None, False, source_weights
             else:
                 print("No valid model selected, defaulting to new training")
                 return None, True, None
-        
+
         print("Invalid choice, please enter 1, 2, or 3")
 
-def load_source_weights(source_path: str, target_model: PPO, env, device) -> bool:
-    """
-    Manually load matching weights layer by layer from source model.
-    """
+
+def load_source_weights(source_path: str, target_model: RecurrentPPO, env, device) -> bool:
+    import traceback  # Add import
+    
     try:
         print(f"Loading source weights from: {source_path}")
-        
-        # Load source model directly without environment
-        source_model = PPO.load(source_path, device=device)
-        
+        try:
+            from stable_baselines3 import PPO
+            source_model = PPO.load(source_path, device=device)
+            print("Detected source as PPO model")
+            source_type = "PPO"
+        except:
+            source_model = RecurrentPPO.load(source_path, device=device)
+            print("Detected source as RecurrentPPO model") 
+            source_type = "RecurrentPPO"
+
         # Get state dictionaries
         source_state = source_model.policy.state_dict()
         target_state = target_model.policy.state_dict()
-        
+        new_state = dict(target_state)
+
         # Track transfers
         transferred = []
         skipped = []
-        
-        # New state dict to build
-        new_state = {}
-        
-        # Manually check and transfer each layer
+
+        # Layer mapping
+        layer_groups = {
+            'cnn': ['features_extractor.img_head'],
+            'features': [
+                'features_extractor.image_fusion',
+                'features_extractor.surrounding_fusion', 
+                'features_extractor.scalar_fusion',
+                'features_extractor.fusion'
+            ],
+            'policy': ['mlp_extractor', 'action_net', 'value_net'],
+            'lstm': ['lstm']
+        }
+
+        # Process each target layer
         for key in target_state.keys():
             try:
-                if key in source_state:
-                    if source_state[key].shape == target_state[key].shape:
-                        # Shapes match - copy weights
-                        new_state[key] = source_state[key]
-                        transferred.append(key)
-                    else:
-                        # Shapes don't match - keep original
-                        new_state[key] = target_state[key]
-                        skipped.append(f"{key}: {source_state[key].shape} vs {target_state[key].shape}")
-                else:
-                    # Key not in source - keep original
-                    new_state[key] = target_state[key]
-                    skipped.append(f"{key}: not found in source")
+                # Skip LSTM for PPO source
+                if source_type == "PPO" and any(x in key for x in layer_groups['lstm']):
+                    skipped.append(f"{key} (LSTM layer skipped for PPO)")
+                    continue
+
+                # Get layer type
+                layer_type = 'other'
+                for group, patterns in layer_groups.items():
+                    if any(pattern in key for pattern in patterns):
+                        layer_type = group
+                        break
+
+                # Try direct transfer first
+                if key in source_state and source_state[key].shape == target_state[key].shape:
+                    new_state[key] = source_state[key]
+                    transferred.append(f"{key} ({layer_type})")
+                    continue
+
+                # Try policy layer name variants
+                if layer_type == 'policy':
+                    old_style = key.replace('mlp_extractor', 'pi')
+                    if old_style in source_state and source_state[old_style].shape == target_state[key].shape:
+                        new_state[key] = source_state[old_style]
+                        transferred.append(f"{key} (policy remapped)")
+                        continue
+
+                skipped.append(f"{key} (shape mismatch or not found)")
+
             except Exception as e:
-                print(f"Error transferring layer {key}: {e}")
-                new_state[key] = target_state[key]
-                skipped.append(f"{key}: error")
-        
-        # Load the combined weights
+                print(f"Error on layer {key}: {e}")
+                skipped.append(f"{key} (error)")
+
+        # Print summary by category
+        print("\nTransfer Summary:")
+        for group in layer_groups.keys():
+            group_transfers = [t for t in transferred if group in t.lower()]
+            if group_transfers:
+                print(f"\n{group.upper()} layers transferred:")
+                for t in group_transfers:
+                    print(f"✓ {t}")
+
+        print(f"\nSkipped {len(skipped)} layers:")
+        for s in skipped:
+            print(f"✗ {s}")
+
+        # Load the filtered state dict
         target_model.policy.load_state_dict(new_state, strict=False)
         
-        # Print detailed transfer report
-        print("\nTransfer Report:")
-        print(f"Successfully transferred {len(transferred)} layers:")
-        for key in transferred:
-            print(f"✓ {key}")
-        print(f"\nSkipped {len(skipped)} layers:")
-        for msg in skipped:
-            print(f"✗ {msg}")
-
         if FREEZE_CNN_WEIGHTS:
             for param in target_model.policy.features_extractor.img_head.parameters():
                 param.requires_grad = False
-            
+            print("\nCNN weights frozen")
+
         return len(transferred) > 0
-        
+
     except Exception as e:
         print(f"Error during weight transfer: {e}")
+        traceback.print_exc()
         return False
+    
 
 def main_training_loop():
-    """Main training loop with automatic restart on failure"""
     while True:
         try:
-            # Find available windows
             minecraft_windows = find_available_windows()
-            if len(minecraft_windows) < 1:  # Need at least eval + 1 training
+            if len(minecraft_windows) < 1:
                 print("Not enough windows found. Need at least 2 windows.")
                 return
 
             print(f"Starting training with {len(minecraft_windows)-1} training environments")
             
-            # Adjust parallel envs based on available windows
             actual_parallel_envs = len(minecraft_windows)
-            
-            # Initialize environments with available windows
-            train_env_fns = [make_env(i, minecraft_windows=minecraft_windows) 
-                           for i in range(actual_parallel_envs)]
+            train_env_fns = [make_env(i, minecraft_windows=minecraft_windows) for i in range(actual_parallel_envs)]
             train_env = SubprocVecEnv(train_env_fns)
             train_env = VecMonitor(train_env)
-            #train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, 
-            #                       clip_obs=10.0)
-            
-            #val_env_fn = [make_env(0, is_eval=True, minecraft_windows=minecraft_windows)]
-            #eval_env = SubprocVecEnv(eval_env_fn)
-            #eval_env = VecMonitor(eval_env)
-            #eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, 
-            #                      clip_obs=10.0, training=False)
 
-            # Load latest model or create new
             model_path, new_training, source_weights = select_training_mode(MODEL_PATH_PPO)
 
             if new_training:
@@ -613,21 +545,11 @@ def main_training_loop():
                 print("No valid model selected, starting new training")
                 model = create_new_model(train_env)
 
-            # Setup callbacks
             callbacks = [
                 SaveOnStepCallback(SAVE_EVERY_STEPS, MODEL_PATH_PPO),
-                #EvalCallback(
-                #    eval_env=eval_env,
-                #    best_model_save_path=MODEL_PATH_PPO,
-                #    log_path=LOG_DIR,
-                #    eval_freq=EVAL_FREQ,
-                #    n_eval_episodes=EVAL_EPISODES,
-                #    deterministic=False
-                #),
                 EntCoefScheduleCallback(ENT_COEF)
             ]
 
-            # Training loop
             timesteps_done = model.num_timesteps if hasattr(model, 'num_timesteps') else 0
             while timesteps_done < TOTAL_TIMESTEPS:
                 try:
@@ -639,18 +561,15 @@ def main_training_loop():
                         reset_num_timesteps=False
                     )
                     timesteps_done = TOTAL_TIMESTEPS
-
                 except Exception as e:
                     print(f"Training error: {e}")
-                    # Save recovery model
                     recovery_path = os.path.join(
                         MODEL_PATH_PPO,
                         f"recovery_model_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
                     )
                     model.save(recovery_path)
-                    raise  # Re-raise to trigger restart
+                    raise
 
-            # Successful completion
             final_path = os.path.join(
                 MODEL_PATH_PPO, 
                 f"final_model_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
@@ -668,7 +587,6 @@ def main_training_loop():
         finally:
             try:
                 train_env.close()
-                #eval_env.close()
             except:
                 pass
 
