@@ -14,7 +14,13 @@ ACTIONS = [
     "look_up",
     "look_down",
     "attack",
-    "reset 2"
+    "reset 2",
+    "tp 1",
+    "tp 2",
+    "tp 3",
+    "tp 4",
+    "attack 2",
+    "monitor",
 ]
 
 SERVER_URI = "ws://localhost:8080"

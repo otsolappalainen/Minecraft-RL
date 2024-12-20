@@ -5,7 +5,7 @@ import time
 
 async def send_turn_right(uri):
     message = {
-        "action": "reset 2",
+        "action": "spawnrate 31 60 31 10 16 4 30 50 100",
     }
 
     async with websockets.connect(uri) as websocket:
@@ -20,19 +20,12 @@ async def send_turn_right(uri):
 async def main():
     uris = [
         "ws://localhost:8080",
-        "ws://localhost:8081",
-        "ws://localhost:8082",
-        "ws://localhost:8083",
-        "ws://localhost:8084",
-        "ws://localhost:8085",
-        "ws://localhost:8086",
-        "ws://localhost:8087",
-        "ws://localhost:8088",
+        "ws://localhost:8081", "ws://localhost:8082", "ws://localhost:8083", "ws://localhost:8084","ws://localhost:8085","ws://localhost:8086","ws://localhost:8087","ws://localhost:8088","ws://localhost:8089","ws://localhost:8090","ws://localhost:8091",
     ]
 
     for uri in uris:
         await send_turn_right(uri)
-        await asyncio.sleep(1)  # Delay of 2 seconds between each message
+        await asyncio.sleep(0.5)  # Delay of 2 seconds between each message
 
 # Run the async function
 asyncio.get_event_loop().run_until_complete(main())
