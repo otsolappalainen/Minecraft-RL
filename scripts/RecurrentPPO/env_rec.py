@@ -17,9 +17,9 @@ import os
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
-MAX_EPISODE_STEPS = 4096
+MAX_EPISODE_STEPS = 1024
 STEP_PENALTY = -0.1
-HEALTH_LOSS_PENALTY = -2.5
+HEALTH_LOSS_PENALTY = -5
 DEATH_PENALTY = -10.0
 TIMEOUT_STEP_LONG = 30
 TIMEOUT_STATE = 30
@@ -300,10 +300,6 @@ class MinecraftEnv(gym.Env):
                 reward += 0.5
                 self.total_mob_appear_reward += 0.5
 
-            # Track invalid attack penalty
-            if mobs_norm[0] == 0.0 and action_name == "attack 2":
-                reward -= 0.5
-                self.total_invalid_attack_penalty -= 0.5
 
             # Track health/death penalties
             if health < self.previous_health:
@@ -317,7 +313,7 @@ class MinecraftEnv(gym.Env):
                 self.total_death_penalty += DEATH_PENALTY
 
             # Reward if the agent attacks a mob and bonus if the agent doesnt get hit in return
-            if mobs_norm[0] == 1 and action_name == "attack 2":
+            if self.had_mob and action_name == "attack 2":
                 if self.health_history.count(True) == 0:
                     reward += 2.5
                     self.total_valid_attack_penalty += 2.5

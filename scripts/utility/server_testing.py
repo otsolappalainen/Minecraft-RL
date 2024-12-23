@@ -5,7 +5,7 @@ import time
 
 async def send_turn_right(uri):
     message = {
-        "action": "spawnrate 31 60 31 10 16 4 30 50 100",
+        "action": "spawnrate 31 60 31 6 16 4 20 100 150",
     }
 
     async with websockets.connect(uri) as websocket:
@@ -20,7 +20,11 @@ async def send_turn_right(uri):
 async def main():
     uris = [
         "ws://localhost:8080",
-        "ws://localhost:8081", "ws://localhost:8082", "ws://localhost:8083", "ws://localhost:8084","ws://localhost:8085","ws://localhost:8086","ws://localhost:8087","ws://localhost:8088","ws://localhost:8089","ws://localhost:8090","ws://localhost:8091",
+        "ws://localhost:8081", "ws://localhost:8082", "ws://localhost:8083", 
+        "ws://localhost:8084","ws://localhost:8085","ws://localhost:8086","ws://localhost:8087",
+        "ws://localhost:8088",
+        #"ws://localhost:8089","ws://localhost:8090","ws://localhost:8091",
+        #"ws://localhost:8092","ws://localhost:8093","ws://localhost:8094",
     ]
 
     for uri in uris:

@@ -33,28 +33,27 @@ def remove_alpha_channel(image):
 
 
 def get_model_path():
-    PPO_MODELS_DIR = Path(r"E:\PPO_BC_MODELS\models_ppo_240")
+    import tkinter as tk
+    from tkinter import filedialog
     
-    # Get model files
-    models = [f for f in os.listdir(PPO_MODELS_DIR) if f.endswith('.zip')]
+    # Initialize tkinter root
+    root = tk.Tk()
+    root.withdraw()  # Hide the root window
     
-    if not models:
-        raise ValueError("No models found in directory")
+    # Set initial directory
+    initial_dir = Path(r"E:\PPO_BC_MODELS\models_ppo_240")
     
-    print("\nAvailable models:")
-    for idx, name in enumerate(models, 1):
-        print(f"{idx}. {name}")
+    # Open file dialog
+    model_path = filedialog.askopenfilename(
+        title="Select Model File",
+        initialdir=initial_dir,
+        filetypes=[("ZIP files", "*.zip")]
+    )
     
-    while True:
-        try:
-            choice = int(input("\nSelect model number: ")) - 1
-            if 0 <= choice < len(models):
-                # Return full path as string
-                return str(PPO_MODELS_DIR / models[choice])
-            print("Invalid selection")
-        except ValueError:
-            print("Please enter a number")
-
+    if not model_path:
+        raise ValueError("No model selected")
+        
+    return model_path
 
 class CNNVisualizer:
     def __init__(self, model_path, image_dir, force_cpu=True):
@@ -108,7 +107,7 @@ class CNNVisualizer:
 
     def visualize_feature_maps(self, image_path, save_dir):
         activations = self.get_feature_maps(image_path)
-        if activations is None:
+        if (activations is None):
             return
             
         layer_names = ['conv1_16', 'conv2_32', 'conv3_64', 'conv4_32']
@@ -304,7 +303,7 @@ def create_side_by_side_video(results, save_path, config=VIDEO_CONFIG, global_mi
         # Use global normalization
         heatmap = result['heatmap']
         heatmap = cv2.resize(heatmap, (output_width, output_height), 
-                           interpolation=cv2.INTER_LANCZOS4)
+                           interpolation=cv2.INTER_NEAREST)
         
         # Scale to 0-255 using global min/max
         heatmap = ((heatmap - global_min) / (global_max - global_min) * 255).astype(np.uint8)
@@ -392,18 +391,329 @@ def sort_images_by_timestamp(image_dir):
                    if f.suffix.lower() in ('.png', '.jpg', '.jpeg')]
     return sorted(image_files, key=lambda x: extract_timestamp(x.name))
 
+def create_quad_video(results, save_path, config=VIDEO_CONFIG, global_min=None, global_max=None):
+    output_height = config['OUTPUT_HEIGHT'] // 2
+    output_width = config['OUTPUT_WIDTH'] // 2
+    
+    codec_options = [
+        ('mp4v', '.mp4'),
+        ('XVID', '.avi'),
+        ('MJPG', '.avi')
+    ]
+    
+    out = None
+    for codec, ext in codec_options:
+        try:
+            save_path = str(save_path).rsplit('.', 1)[0] + ext
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            out = cv2.VideoWriter(
+                save_path,
+                fourcc,
+                config['FPS'],
+                (output_width * 2, output_height * 2),
+                isColor=True
+            )
+            if out.isOpened():
+                print(f"Successfully initialized video writer with codec: {codec}")
+                break
+        except Exception as e:
+            print(f"Failed to initialize codec {codec}: {e}")
+            continue
+    
+    if out is None or not out.isOpened():
+        raise RuntimeError("Could not initialize any video codec")
+        
+    for idx, result in enumerate(results, 1):
+        print(f"\rCreating frame {idx}/{len(results)}", end="")
+        
+        # 1. Original Image
+        original = cv2.resize(result['original'], 
+                            (output_width, output_height), 
+                            interpolation=cv2.INTER_NEAREST)
+        original = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
+        
+        # 2. Standard Heatmap
+        heatmap = result['heatmap']
+        heatmap = cv2.resize(heatmap, (output_width, output_height), 
+                           interpolation=cv2.INTER_NEAREST)
+        heatmap = ((heatmap - global_min) / (global_max - global_min) * 255).astype(np.uint8)
+        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        standard_overlay = cv2.addWeighted(original, 0.7, heatmap_color, 0.3, 0)
+        
+        # 3. Lanczos4 Heatmap
+        heatmap_lanczos = cv2.resize(result['heatmap'], 
+                                   (output_width, output_height), 
+                                   interpolation=cv2.INTER_LANCZOS4)
+        heatmap_lanczos = ((heatmap_lanczos - global_min) / (global_max - global_min) * 255).astype(np.uint8)
+        heatmap_lanczos_color = cv2.applyColorMap(heatmap_lanczos, cv2.COLORMAP_JET)
+        lanczos_overlay = cv2.addWeighted(original, 0.7, heatmap_lanczos_color, 0.3, 0)
+        
+        # 4. Hot-area Filter
+        # Normalize heatmap to 0-1 for mask
+        mask = ((heatmap_lanczos / 255) > 0.5).astype(np.float32)  # Threshold at 0.5
+        mask = np.expand_dims(mask, axis=2)  # Add channel dimension
+        mask = np.repeat(mask, 3, axis=2)  # Repeat for RGB
+        hot_area_view = original * mask
+        
+        # Combine into 2x2 grid
+        top_row = np.hstack([original, standard_overlay])
+        bottom_row = np.hstack([lanczos_overlay, hot_area_view])
+        combined = np.vstack([top_row, bottom_row])
+        
+        out.write(combined)
+    
+    print("\nVideo creation complete!")
+    out.release()
+
+def create_transparent_overlay_video(results, save_path, config=VIDEO_CONFIG, global_min=None, global_max=None):
+    output_height = config['OUTPUT_HEIGHT']
+    output_width = config['OUTPUT_WIDTH']
+    
+    codec_options = [
+        ('mp4v', '.mp4'),
+        ('XVID', '.avi'),
+        ('MJPG', '.avi')
+    ]
+    
+    out = None
+    for codec, ext in codec_options:
+        try:
+            save_path = str(save_path).rsplit('.', 1)[0] + ext
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            out = cv2.VideoWriter(
+                save_path,
+                fourcc,
+                config['FPS'],
+                (output_width * 2, output_height),
+                isColor=True
+            )
+            if out.isOpened():
+                print(f"Successfully initialized video writer with codec: {codec}")
+                break
+        except Exception as e:
+            print(f"Failed to initialize codec {codec}: {e}")
+            continue
+    
+    if out is None or not out.isOpened():
+        raise RuntimeError("Could not initialize any video codec")
+        
+    for idx, result in enumerate(results, 1):
+        print(f"\rCreating frame {idx}/{len(results)}", end="")
+        
+        # Original Image
+        original = cv2.resize(result['original'], 
+                            (output_width, output_height), 
+                            interpolation=cv2.INTER_NEAREST)
+        original = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
+        
+        # Create transparency mask from heatmap
+        heatmap = result['heatmap']
+        heatmap = cv2.resize(heatmap, (output_width, output_height), 
+                           interpolation=cv2.INTER_NEAREST)
+        
+        # Normalize heatmap to 0-1
+        mask = (heatmap - global_min) / (global_max - global_min)
+        
+        # Create black background
+        black_bg = np.zeros_like(original)
+        
+        # Blend based on heatmap values
+        masked = original * mask[..., None] + black_bg * (1 - mask[..., None])
+        masked = masked.astype(np.uint8)
+        
+        # Combine side by side
+        combined = np.hstack([original, masked])
+        out.write(combined)
+    
+    print("\nVideo creation complete!")
+    out.release()
+
+def create_stacked_comparison_video(results, save_path, config=VIDEO_CONFIG, global_min=None, global_max=None):
+    def get_side_by_side_frame(result, output_height, output_width):
+        # Top row: Original | Colored heatmap overlay
+        original = cv2.resize(result['original'], 
+                            (output_width, output_height), 
+                            interpolation=cv2.INTER_NEAREST)
+        original = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
+        
+        heatmap = result['heatmap']
+        heatmap = cv2.resize(heatmap, (output_width, output_height), 
+                           interpolation=cv2.INTER_NEAREST)
+        heatmap = ((heatmap - global_min) / (global_max - global_min) * 255).astype(np.uint8)
+        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        overlay = cv2.addWeighted(original, 0.7, heatmap_color, 0.3, 0)
+        return np.hstack([original, overlay])
+
+    def get_bottom_row_frame(result, output_height, output_width):
+        # Left side: Pure heatmap on black background
+        heatmap = result['heatmap']
+        heatmap = cv2.resize(heatmap, (output_width, output_height), 
+                           interpolation=cv2.INTER_NEAREST)
+        heatmap = ((heatmap - global_min) / (global_max - global_min) * 255).astype(np.uint8)
+        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        
+        # Right side: Transparent overlay version
+        original = cv2.resize(result['original'], 
+                            (output_width, output_height), 
+                            interpolation=cv2.INTER_NEAREST)
+        original = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
+        
+        # Create black background
+        black_bg = np.zeros_like(original)
+        
+        # Normalize heatmap to 0-1
+        mask = (heatmap - global_min) / (global_max - global_min)
+        
+        # Blend based on heatmap values
+        masked = original * mask[..., None] + black_bg * (1 - mask[..., None])
+        masked = masked.astype(np.uint8)
+        
+        return np.hstack([heatmap_color, masked])
+
+    # Setup video writer
+    output_height = config['OUTPUT_HEIGHT'] // 2  # Half height for each row
+    output_width = config['OUTPUT_WIDTH']
+    
+    codec_options = [
+        ('mp4v', '.mp4'),
+        ('XVID', '.avi'),
+        ('MJPG', '.avi')
+    ]
+    
+    out = None
+    for codec, ext in codec_options:
+        try:
+            save_path = str(save_path).rsplit('.', 1)[0] + ext
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            out = cv2.VideoWriter(
+                save_path,
+                fourcc,
+                config['FPS'],
+                (output_width * 2, output_height * 2),  # Full size for 2x2 grid
+                isColor=True
+            )
+            if out.isOpened():
+                print(f"Successfully initialized video writer with codec: {codec}")
+                break
+        except Exception as e:
+            print(f"Failed to initialize codec {codec}: {e}")
+            continue
+    
+    if out is None or not out.isOpened():
+        raise RuntimeError("Could not initialize any video codec")
+
+    # Create frames
+    for idx, result in enumerate(results, 1):
+        print(f"\rCreating frame {idx}/{len(results)}", end="")
+        
+        # Get both rows
+        top_row = get_side_by_side_frame(result, output_height, output_width)
+        bottom_row = get_bottom_row_frame(result, output_height, output_width)
+        
+        # Stack them vertically
+        combined = np.vstack([top_row, bottom_row])
+        out.write(combined)
+    
+    print("\nVideo creation complete!")
+    out.release()
+
+def create_calibration_window(image_path, visualizer, global_min, global_max):
+    def on_trackbar(x):
+        # Get current values
+        threshold = cv2.getTrackbarPos('Threshold', 'Calibration') / 100
+        contrast = cv2.getTrackbarPos('Contrast', 'Calibration') / 10
+        
+        # Process image with current values
+        original = cv2.imread(str(image_path))
+        original = cv2.resize(original, (VIDEO_CONFIG['OUTPUT_WIDTH']//2, VIDEO_CONFIG['OUTPUT_HEIGHT']//2))
+        
+        activations = visualizer.get_feature_maps(str(image_path))
+        heatmap = activations[-1].mean(dim=1)[0].cpu().numpy()
+        heatmap = cv2.resize(heatmap, (VIDEO_CONFIG['OUTPUT_WIDTH']//2, VIDEO_CONFIG['OUTPUT_HEIGHT']//2))
+        
+        # Normalize and apply mask
+        mask = (heatmap - global_min) / (global_max - global_min)
+        mask = 1 / (1 + np.exp(-contrast * (mask - threshold)))
+        
+        # Create visualization
+        black_bg = np.zeros_like(original)
+        masked = original * mask[..., None] + black_bg * (1 - mask[..., None])
+        masked = masked.astype(np.uint8)
+        
+        # Show side by side
+        combined = np.hstack([original, masked])
+        cv2.imshow('Calibration', combined)
+
+    # Create window
+    cv2.namedWindow('Calibration')
+    
+    # Create trackbars (threshold 0-100 represents 0-1, contrast 0-100 represents 0-10)
+    cv2.createTrackbar('Threshold', 'Calibration', 50, 100, on_trackbar)
+    cv2.createTrackbar('Contrast', 'Calibration', 10, 100, on_trackbar)
+    
+    # Initial render
+    on_trackbar(0)
+    
+    print("\nPress 'S' to save values and exit")
+    print("Press 'ESC' to exit without saving")
+    
+    while True:
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # ESC
+            cv2.destroyAllWindows()
+            return None, None
+        elif key == ord('s'):
+            threshold = cv2.getTrackbarPos('Threshold', 'Calibration') / 100
+            contrast = cv2.getTrackbarPos('Contrast', 'Calibration') / 10
+            cv2.destroyAllWindows()
+            return threshold, contrast
+
 def main():
     try:
+        # Ask for mode
+        print("\nSelect mode:")
+        print("1. Calibrate parameters")
+        print("2. Process videos")
+        mode = input("Enter choice (1/2): ").strip()
+        
         model_path = get_model_path()
-        
-        # Use hardcoded paths
-        save_dir = Path(r"E:\PPO_BC_MODELS\visualizations")
         image_dir = Path(r"C:\Users\odezz\source\Minecraft-RL\scripts\PPO\env_screenshots")
+        save_dir = Path(r"E:\PPO_BC_MODELS\visualizations")
         
+        # Initialize visualizer
+        print("Initializing visualizer...")
+        visualizer = CNNVisualizer(model_path, str(image_dir), force_cpu=True)
+        
+        # Get image files
+        image_files = sort_images_by_timestamp(image_dir)
+        
+        if mode == "1":
+            # Calibration mode
+            print("Calibration mode selected...")
+            
+            # Process one random image for calibration
+            random_image = np.random.choice(image_files)
+            activations = visualizer.get_feature_maps(str(random_image))
+            heatmap = activations[-1].mean(dim=1)[0].cpu().numpy()
+            global_min, global_max = heatmap.min(), heatmap.max()
+            
+            # Open calibration window
+            threshold, contrast = create_calibration_window(
+                random_image, visualizer, global_min, global_max)
+                
+            if threshold is None:
+                print("Calibration cancelled")
+                return
+                
+            print(f"\nCalibrated values: threshold={threshold:.2f}, contrast={contrast:.2f}")
+            return
+            
+        # Normal processing mode
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         save_dir = save_dir / "videos" / f"run_{timestamp}"
         save_dir.mkdir(parents=True, exist_ok=True)
         
+        # ...rest of main() code...
         if not image_dir.exists():
             print(f"Image directory {image_dir} not found!")
             return
@@ -425,8 +735,25 @@ def main():
         create_side_by_side_video(results, side_by_side_path, global_min=global_min, global_max=global_max)
         
         # Create feature map videos
-        print("Creating feature map videos...")
-        create_feature_map_videos(results, save_dir)
+        #print("Creating feature map videos...")
+        #create_feature_map_videos(results, save_dir)
+        
+        # Replace quad video with stacked comparison
+        print("Creating stacked comparison video...")
+        stacked_path = save_dir / "stacked_comparison.mp4"
+        create_stacked_comparison_video(
+            results, 
+            stacked_path, 
+            global_min=global_min, 
+            global_max=global_max,
+            #mask_threshold=0.4,  # Adjust these values to control transparency
+            #mask_contrast=7.5    # Higher = sharper transition
+        )
+        
+        # Create transparent overlay video
+        print("Creating transparent overlay video...")
+        transparent_path = save_dir / "transparent_overlay.mp4"
+        create_transparent_overlay_video(results, transparent_path, global_min=global_min, global_max=global_max)
         
         print(f"Videos saved to {save_dir}")
         
