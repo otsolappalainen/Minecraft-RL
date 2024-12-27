@@ -31,12 +31,10 @@ from typing import Optional
 import tkinter as tk
 from tkinter import filedialog
 
-
 # System configuration
 PARALLEL_ENVS = 12
 WINDOW_CROP_WIDTH = 240
 WINDOW_CROP_HEIGHT = 120
-MOVEMENT_DETECTION_THRESHOLD = 5
 device = th.device("cuda" if th.cuda.is_available() else "cpu")
 FREEZE_CNN_WEIGHTS = False
 
@@ -52,8 +50,8 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 PPO_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 
-TOTAL_TIMESTEPS = 5_000_000
-LEARNING_RATE = 1e-5
+TOTAL_TIMESTEPS = 10_000_000
+LEARNING_RATE = 5e-5
 N_STEPS = 4096
 BATCH_SIZE = 256
 N_EPOCHS = 5
@@ -73,98 +71,88 @@ TARGET_KL = 0.05
 VERBOSE = 1
 SEED = None
 
-MIN_LR = 1e-6
-MIN_ENT_COEF = 0.001
+MIN_LR = 5e-6
+MIN_ENT_COEF = 0.005
 DECAY_STEPS = 1_000_000
+
 
 def get_scheduled_lr(initial_lr, progress_remaining: float):
     decay_rate = -5 * (1 - progress_remaining)
     return max(MIN_LR, initial_lr * np.exp(decay_rate))
 
+
 def get_scheduled_ent_coef(initial_ent, progress_remaining: float):
     decay_rate = -5 * (1 - progress_remaining)
     return max(MIN_ENT_COEF, initial_ent * np.exp(decay_rate))
 
-class CustomCNNFeatureExtractor(BaseFeaturesExtractor):
+
+class SimpleCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space, features_dim=512):
         super().__init__(observation_space, features_dim)
 
-        self.img_head = nn.Sequential(
-            nn.Conv2d(in_channels=3, out_channels=16, kernel_size=5, stride=2, padding=2),
+        # CNN head with per-channel PReLU
+        self.image_head = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=5, stride=2, padding=2),
             nn.LeakyReLU(inplace=True),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
             nn.LeakyReLU(inplace=True),
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.LeakyReLU(inplace=True),
             nn.Flatten()
         )
 
+        # Figure out CNN output size
         with th.no_grad():
-            sample_input = th.zeros(1, 3, 120, 240)
-            cnn_output = self.img_head(sample_input)
-            self.cnn_features = cnn_output.shape[1]
+            dummy = th.zeros(1, 3, 120, 240)
+            out = self.image_head(dummy)
+            self.cnn_out_dim = out.shape[1]
 
         self.image_fusion = nn.Sequential(
-            nn.Linear(self.cnn_features, 512),
-            nn.ReLU(inplace=True),
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
+            nn.Linear(self.cnn_out_dim, 1024),
+            nn.ReLU(inplace=True),  # Shared parameter for FC layer
+            nn.Linear(1024, 256),
+            nn.ReLU(inplace=True),  # Shared parameter for FC layer
         )
 
+        # For scalars
         scalar_dim = (
-            observation_space.spaces["hand"].shape[0] +
-            observation_space.spaces["mobs"].shape[0] +
-            observation_space.spaces["player_state"].shape[0]
+            observation_space.spaces["hand"].shape[0]
+            + observation_space.spaces["mobs"].shape[0]
+            + observation_space.spaces["player_state"].shape[0]
+            + 12  # surrounding_blocks
         )
-
-        self.surrounding_fusion = nn.Sequential(
-            nn.Linear(12, 128),
-            nn.ReLU(inplace=True),
-        )
-
-        self.scalar_fusion = nn.Sequential(
+        self.scalar_fc = nn.Sequential(
             nn.Linear(scalar_dim, 128),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True),  # Shared parameter for FC layer
         )
 
+        # Final fusion
         self.fusion = nn.Sequential(
-            nn.Linear(256 + 128 + 128, features_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(features_dim, features_dim),
-            nn.ReLU(inplace=True),
+            nn.Linear(256 + 128, features_dim),
+            nn.ReLU(inplace=True),  # Shared parameter for FC layer
         )
 
-    def forward(self, observations):
-        img_features = self.img_head(observations["image"])
-        img_features = self.image_fusion(img_features)
+    def forward(self, obs):
+        img_features_vec = self.image_head(obs["image"])
+        img_features = self.image_fusion(img_features_vec)
 
-        surrounding_features = self.surrounding_fusion(
-            observations["surrounding_blocks"]
-        )
-
-        scalar_input = th.cat([
-            observations["hand"],
-            observations["mobs"],
-            observations["player_state"]
+        scalars = th.cat([
+            obs["surrounding_blocks"],
+            obs["hand"],
+            obs["mobs"],
+            obs["player_state"]
         ], dim=1)
-        scalar_features = self.scalar_fusion(scalar_input)
-
-        combined = th.cat([
-            img_features,
-            surrounding_features,
-            scalar_features
-        ], dim=1)
-
+        scalar_feats = self.scalar_fc(scalars)
+        combined = th.cat([img_features, scalar_feats], dim=1)
         return self.fusion(combined)
+
 
 
 def create_new_model(env):
     policy_kwargs = dict(
-        features_extractor_class=CustomCNNFeatureExtractor,
+        features_extractor_class=SimpleCNNExtractor,
         features_extractor_kwargs=dict(features_dim=512),
-        net_arch=[1024, 1024],
+        net_arch=[512],
         lstm_hidden_size=512,  # This defines the LSTM memory size
         n_lstm_layers=1        # (optional) number of LSTM layers
     )
@@ -193,11 +181,13 @@ def create_new_model(env):
         device=device,
         policy_kwargs=policy_kwargs,
         verbose=VERBOSE,
-        target_kl=TARGET_KL
+        #target_kl=TARGET_KL
     )
 
     if FREEZE_CNN_WEIGHTS:
-        for param in model.policy.features_extractor.img_head.parameters():
+        for param in model.policy.features_extractor.img_head_global.parameters():
+            param.requires_grad = False
+        for param in model.policy.features_extractor.img_head_center.parameters():
             param.requires_grad = False
         print("CNN weights frozen")
 
@@ -256,6 +246,7 @@ def attempt_window_connection(port, retries=2):
             print(f"Error on try {i+1}: {e}")
     return None
 
+
 def find_available_windows():
     print("\n=== Starting Minecraft Window Detection ===")
     windows = []
@@ -266,6 +257,7 @@ def find_available_windows():
             windows.append(window)
     print(f"\nFound {len(windows)} working windows")
     return windows
+
 
 def make_env(rank, is_eval=False, minecraft_windows=None):
     def _init():
@@ -284,17 +276,18 @@ def make_env(rank, is_eval=False, minecraft_windows=None):
             raise
     return _init
 
+
 def load_ppo_model(model_path, env, device):
     try:
         print(f"Loading model from {model_path}...")
         new_model = create_new_model(env)
-        # Load PPO weights directly into RecurrentPPO if compatible
-        # If not, you may need to do manual layer transfers
         old_model = RecurrentPPO.load(model_path, env=env, device=device)
         new_model.policy.load_state_dict(old_model.policy.state_dict())
         
         if FREEZE_CNN_WEIGHTS:
-            for param in new_model.policy.features_extractor.img_head.parameters():
+            for param in new_model.policy.features_extractor.img_head_global.parameters():
+                param.requires_grad = False
+            for param in new_model.policy.features_extractor.img_head_center.parameters():
                 param.requires_grad = False
 
         return new_model
@@ -302,12 +295,14 @@ def load_ppo_model(model_path, env, device):
         print(f"Error loading model: {e}")
         raise
 
+
 def get_latest_model(model_dir):
     models = [f for f in os.listdir(model_dir) if f.endswith('.zip')]
     if not models:
         return None
     return os.path.join(model_dir, 
                        max(models, key=lambda x: os.path.getctime(os.path.join(model_dir, x))))
+
 
 class SaveOnStepCallback(BaseCallback):
     def __init__(self, save_freq, save_path):
@@ -324,9 +319,11 @@ class SaveOnStepCallback(BaseCallback):
             self.last_save_step = self.num_timesteps
         return True
 
+
 def get_models_list(model_dir: str) -> list[str]:
     models = [f for f in os.listdir(model_dir) if f.endswith('.zip')]
     return sorted(models, key=lambda x: os.path.getctime(os.path.join(model_dir, x)))
+
 
 def input_with_timeout(prompt: str, timeout: int = 60) -> Optional[str]:
     print(prompt)
@@ -354,6 +351,7 @@ def input_with_timeout(prompt: str, timeout: int = 60) -> Optional[str]:
 
         time.sleep(0.1)
 
+
 def select_model(model_dir: str) -> str:
     models = get_models_list(model_dir)
     if not models:
@@ -379,6 +377,7 @@ def select_model(model_dir: str) -> str:
     except ValueError:
         print("Invalid input, using latest model")
         return os.path.join(model_dir, models[-1])
+
 
 def select_training_mode(model_dir: str) -> tuple[str, bool, str]:
     print("\n=== Training Mode Selection ===")
@@ -413,8 +412,7 @@ def select_training_mode(model_dir: str) -> tuple[str, bool, str]:
 
 
 def load_source_weights(source_path: str, target_model: RecurrentPPO, env, device) -> bool:
-    import traceback  # Add import
-    
+    import traceback
     try:
         print(f"Loading source weights from: {source_path}")
         try:
@@ -438,10 +436,11 @@ def load_source_weights(source_path: str, target_model: RecurrentPPO, env, devic
 
         # Layer mapping
         layer_groups = {
-            'cnn': ['features_extractor.img_head'],
+            'cnn': ['features_extractor.img_head_global', 
+                    'features_extractor.img_head_center'],
             'features': [
                 'features_extractor.image_fusion',
-                'features_extractor.surrounding_fusion', 
+                'features_extractor.surrounding_fusion',
                 'features_extractor.scalar_fusion',
                 'features_extractor.fusion'
             ],
@@ -501,7 +500,9 @@ def load_source_weights(source_path: str, target_model: RecurrentPPO, env, devic
         target_model.policy.load_state_dict(new_state, strict=False)
         
         if FREEZE_CNN_WEIGHTS:
-            for param in target_model.policy.features_extractor.img_head.parameters():
+            for param in target_model.policy.features_extractor.img_head_global.parameters():
+                param.requires_grad = False
+            for param in target_model.policy.features_extractor.img_head_center.parameters():
                 param.requires_grad = False
             print("\nCNN weights frozen")
 
@@ -589,6 +590,7 @@ def main_training_loop():
                 train_env.close()
             except:
                 pass
+
 
 if __name__ == "__main__":
     main_training_loop()
