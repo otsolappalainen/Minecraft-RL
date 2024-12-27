@@ -20,6 +20,9 @@ models/
 .venv/
 .vscode/
 
+# Ignore old files
+PPO/
+
 # Ignore model and checkpoint files
 *.pth
 *.zip

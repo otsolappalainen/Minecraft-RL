@@ -65,20 +65,13 @@ class CNNVisualizer:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model = PPO.load(model_path)
         
-        # Extract both CNN heads
-        self.global_cnn = model.policy.features_extractor.img_head_global.to(self.device)
-        self.center_cnn = model.policy.features_extractor.img_head_center.to(self.device)
+        # Extract only global CNN head
+        self.global_cnn = model.policy.features_extractor.image_head.to(self.device)
         self.global_cnn.eval()
-        self.center_cnn.eval()
         
-        # Transforms for both global and center
+        # Transform for global only
         self.global_transform = transforms.Compose([
             transforms.Resize((VIDEO_CONFIG['INPUT_HEIGHT'], VIDEO_CONFIG['INPUT_WIDTH'])),
-            transforms.ToTensor(),
-        ])
-        
-        self.center_transform = transforms.Compose([
-            transforms.Resize((64, 64)),
             transforms.ToTensor(),
         ])
 
@@ -87,67 +80,37 @@ class CNNVisualizer:
             image = Image.open(image_path)
             image = remove_alpha_channel(image)
             
-            # Process global image
+            # Process global image only
             global_tensor = self.global_transform(image).unsqueeze(0)
             global_tensor = global_tensor.to(self.device)
             
-            # Process center crop
-            # Calculate center crop coordinates
-            width, height = image.size
-            center_size = 64  # Fixed square size
-            left = (width - center_size) // 2
-            top = (height - center_size) // 2
-            center_crop = image.crop((left, top, left + center_size, top + center_size))
-            center_tensor = self.center_transform(center_crop).unsqueeze(0)
-            center_tensor = center_tensor.to(self.device)
-            
             global_activations = []
-            center_activations = []
             
             def hook_fn_global(module, input, output):
                 global_activations.append(output.detach())
-                
-            def hook_fn_center(module, input, output):
-                center_activations.append(output.detach())
             
             hooks_global = []
-            hooks_center = []
             
-            # Add hooks for both CNNs
+            # Add hooks for global CNN only
             for module in self.global_cnn.modules():
                 if isinstance(module, nn.Conv2d):
                     hooks_global.append(module.register_forward_hook(hook_fn_global))
-                    
-            for module in self.center_cnn.modules():
-                if isinstance(module, nn.Conv2d):
-                    hooks_center.append(module.register_forward_hook(hook_fn_center))
             
             with torch.no_grad():
                 global_features = self.global_cnn(global_tensor)
-                center_features = self.center_cnn(center_tensor)
             
-            for hook in hooks_global + hooks_center:
+            for hook in hooks_global:
                 hook.remove()
                 
-            return {
-                'global': global_activations,
-                'center': center_activations
-            }
+            return global_activations
             
         except Exception as e:
             print(f"Error processing {image_path}: {str(e)}")
             return None
 
 def create_combined_heatmap_video(results, save_path, config=VIDEO_CONFIG, global_min=None, global_max=None):
-    output_height = config['OUTPUT_HEIGHT']  # 480
-    output_width = config['OUTPUT_WIDTH']    # 960
-    
-    # Calculate center region dimensions (64x64 scaled up)
-    center_scale = 4  # Scale factor to go from 64 to 256
-    center_size = 64 * center_scale  # 256x256 final size
-    start_h = (output_height - center_size) // 2  # Center vertically
-    start_w = (output_width - center_size) // 2   # Center horizontally
-    
+    output_height = config['OUTPUT_HEIGHT']
+    output_width = config['OUTPUT_WIDTH']
     
     codec_options = [
         ('mp4v', '.mp4'),
@@ -180,31 +143,17 @@ def create_combined_heatmap_video(results, save_path, config=VIDEO_CONFIG, globa
     for idx, result in enumerate(results, 1):
         print(f"\rCreating frame {idx}/{len(results)}", end="")
         
-        # Original image processing
         original = cv2.resize(result['original'], 
                             (output_width, output_height), 
                             interpolation=cv2.INTER_NEAREST)
         original = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
         
-        # Global heatmap processing
-        global_heatmap = result['global_heatmap']
-        global_heatmap = cv2.resize(global_heatmap, (output_width, output_height), 
-                                  interpolation=cv2.INTER_NEAREST)
-        global_heatmap = (global_heatmap - global_min) / (global_max - global_min)
-        
-        # Center heatmap processing - maintain square aspect ratio
-        center_heatmap = result['center_heatmap']
-        center_region = cv2.resize(center_heatmap, (center_size, center_size),
-                                 interpolation=cv2.INTER_NEAREST)
-        center_region = (center_region - center_region.min()) / (center_region.max() - center_region.min())
-        
-        # Create combined heatmap
-        combined_heatmap = global_heatmap.copy()
-        combined_heatmap[start_h:start_h+center_size, start_w:start_w+center_size] += center_region
-        
-        # Normalize final combined heatmap
-        combined_heatmap = np.clip(combined_heatmap, 0, 1)
-        heatmap_uint8 = (combined_heatmap * 255).astype(np.uint8)
+        # Process global heatmap only
+        heatmap = cv2.resize(result['heatmap'], 
+                           (output_width, output_height), 
+                           interpolation=cv2.INTER_NEAREST)
+        heatmap = (heatmap - global_min) / (global_max - global_min)
+        heatmap_uint8 = (heatmap * 255).astype(np.uint8)
         heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
         
         # Create overlay
@@ -222,8 +171,6 @@ def process_batch(visualizer, image_files):
     total = len(image_files)
     global_min = float('inf')
     global_max = float('-inf')
-    center_min = float('inf')
-    center_max = float('-inf')
     
     for idx, img_path in enumerate(image_files, 1):
         print(f"\rProcessing image {idx}/{total}", end="")
@@ -236,27 +183,21 @@ def process_batch(visualizer, image_files):
         if activations is None:
             continue
             
-        global_final = activations['global'][-1]
-        center_final = activations['center'][-1]
+        final_layer = activations[-1]
+        heatmap = final_layer.mean(dim=1)[0].cpu().numpy()
         
-        global_heatmap = global_final.mean(dim=1)[0].cpu().numpy()
-        center_heatmap = center_final.mean(dim=1)[0].cpu().numpy()
-        
-        global_min = min(global_min, global_heatmap.min())
-        global_max = max(global_max, global_heatmap.max())
-        center_min = min(center_min, center_heatmap.min())
-        center_max = max(center_max, center_heatmap.max())
+        global_min = min(global_min, heatmap.min())
+        global_max = max(global_max, heatmap.max())
         
         results.append({
             'original': original,
             'activations': activations,
-            'global_heatmap': global_heatmap,
-            'center_heatmap': center_heatmap,
+            'heatmap': heatmap,
             'path': img_path
         })
     
     print("\nBatch processing complete!")
-    return results, (global_min, global_max), (center_min, center_max)
+    return results, (global_min, global_max)
 
 def visualize_feature_maps(self, image_path, save_dir):
     activations = self.get_feature_maps(image_path)
@@ -470,20 +411,12 @@ def create_transparent_overlay_video(results, save_path, config=VIDEO_CONFIG, gl
         raise ValueError("Empty results list")
         
     # Define dimensions
-    output_height = config['OUTPUT_HEIGHT']  # 480
-    output_width = config['OUTPUT_WIDTH']    # 960
-    center_size = 256  # Final center size
+    output_height = config['OUTPUT_HEIGHT']
+    output_width = config['OUTPUT_WIDTH']
     
-    # CNN input dimensions
-    cnn_dims = {
-        'global_width': 30,
-        'global_height': 15,
-        'center_size': 32  # CNN center input size
-    }
-    
-    # Calculate center position
-    center_h_start = (output_height - center_size) // 2
-    center_w_start = (output_width - center_size) // 2
+    # CNN input dimensions for pixelation
+    cnn_width = 30
+    cnn_height = 15
     
     # Initialize video writer
     out = None
@@ -507,52 +440,25 @@ def create_transparent_overlay_video(results, save_path, config=VIDEO_CONFIG, gl
         try:
             print(f"\rProcessing frame {idx}/{len(results)}", end="")
             
-            # First scale original to output size
+            # Scale original to output size
             original = cv2.resize(result['original'], (output_width, output_height), 
                                 interpolation=cv2.INTER_LINEAR)
             original = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
             
-            # Create global low-res view
-            global_low_res = cv2.resize(original, 
-                                      (cnn_dims['global_width'], cnn_dims['global_height']),
-                                      interpolation=cv2.INTER_AREA)
-            global_img = cv2.resize(global_low_res, (output_width, output_height),
-                                  interpolation=cv2.INTER_NEAREST)
+            # Create pixelated view
+            low_res = cv2.resize(original, (cnn_width, cnn_height),
+                               interpolation=cv2.INTER_AREA)
+            pixelated = cv2.resize(low_res, (output_width, output_height),
+                                 interpolation=cv2.INTER_NEAREST)
             
-            # Extract and process center region
-            center_crop = original[center_h_start:center_h_start+center_size,
-                                 center_w_start:center_w_start+center_size]
+            # Process heatmap
+            heatmap = cv2.resize(result['heatmap'],
+                               (output_width, output_height),
+                               interpolation=cv2.INTER_NEAREST)
+            heatmap = (heatmap - global_min) / (global_max - global_min)
             
-            center_low_res = cv2.resize(center_crop, 
-                                      (cnn_dims['center_size'], cnn_dims['center_size']),
-                                      interpolation=cv2.INTER_AREA)
-            center_img = cv2.resize(center_low_res, (center_size, center_size),
-                                  interpolation=cv2.INTER_NEAREST)
-            
-            # Process heatmaps
-            global_heatmap = cv2.resize(result['global_heatmap'],
-                                      (output_width, output_height),
-                                      interpolation=cv2.INTER_NEAREST)
-            global_heatmap = (global_heatmap - global_min) / (global_max - global_min)
-            
-            center_heatmap = cv2.resize(result['center_heatmap'],
-                                      (center_size, center_size),
-                                      interpolation=cv2.INTER_NEAREST)
-            center_heatmap = (center_heatmap - center_heatmap.min()) / (center_heatmap.max() - center_heatmap.min())
-            
-            # Combine global and center views
-            pixelated = global_img.copy()
-            pixelated[center_h_start:center_h_start+center_size,
-                     center_w_start:center_w_start+center_size] = center_img
-            
-            # Combine heatmaps
-            combined_heatmap = global_heatmap.copy()
-            combined_heatmap[center_h_start:center_h_start+center_size,
-                           center_w_start:center_w_start+center_size] += center_heatmap
-            combined_heatmap = np.clip(combined_heatmap, 0, 1)
-            
-            # Apply new threshold masking
-            transparency_mask = apply_threshold_mask(combined_heatmap)
+            # Apply threshold masking
+            transparency_mask = apply_threshold_mask(heatmap)
             
             # Create final visualization
             black_bg = np.zeros_like(pixelated)
@@ -578,52 +484,28 @@ def create_stacked_comparison_video(results, save_path, config=VIDEO_CONFIG, glo
                             interpolation=cv2.INTER_NEAREST)
         original = cv2.cvtColor(original, cv2.COLOR_RGB2BGR)
         
-        # 2. Top right: Combined heatmap overlay (from combined_heatmap)
-        # Calculate center dimensions
-        center_size = 256
-        start_h = (output_height - center_size) // 2
-        start_w = (output_width - center_size) // 2
-        
-        # Process heatmaps
-        global_heatmap = cv2.resize(result['global_heatmap'],
-                                  (output_width, output_height), 
-                                  interpolation=cv2.INTER_NEAREST)
-        global_heatmap = (global_heatmap - global_min) / (global_max - global_min)
-        
-        center_heatmap = cv2.resize(result['center_heatmap'],
-                                  (center_size, center_size),
-                                  interpolation=cv2.INTER_NEAREST)
-        center_heatmap = (center_heatmap - center_heatmap.min()) / (center_heatmap.max() - center_heatmap.min())
-        
-        # Create combined heatmap
-        combined_heatmap = global_heatmap.copy()
-        combined_heatmap[start_h:start_h+center_size, start_w:start_w+center_size] += center_heatmap
-        combined_heatmap = np.clip(combined_heatmap, 0, 1)
-        heatmap_uint8 = (combined_heatmap * 255).astype(np.uint8)
+        # 2. Top right: Heatmap overlay
+        heatmap = cv2.resize(result['heatmap'],
+                            (output_width, output_height), 
+                            interpolation=cv2.INTER_NEAREST)
+        heatmap = (heatmap - global_min) / (global_max - global_min)
+        heatmap_uint8 = (heatmap * 255).astype(np.uint8)
         heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
         
         # Create overlay for top right
         top_right = cv2.addWeighted(original, 0.7, heatmap_color, 0.3, 0)
         
-        # 3. Bottom left: Pure heatmap on black background
+        # 3. Bottom left: Pure heatmap
         bottom_left = heatmap_color
         
-        # 4. Bottom right: Transparent overlay (from transparent_overlay)
+        # 4. Bottom right: Transparent overlay
         # Create pixelated version
-        global_low_res = cv2.resize(original, (30, 15), interpolation=cv2.INTER_AREA)
-        global_img = cv2.resize(global_low_res, (output_width, output_height), 
+        low_res = cv2.resize(original, (30, 15), interpolation=cv2.INTER_AREA)
+        pixelated = cv2.resize(low_res, (output_width, output_height), 
                               interpolation=cv2.INTER_NEAREST)
         
-        center_crop = original[start_h:start_h+center_size, start_w:start_w+center_size]
-        center_low_res = cv2.resize(center_crop, (32, 32), interpolation=cv2.INTER_AREA)
-        center_img = cv2.resize(center_low_res, (center_size, center_size), 
-                              interpolation=cv2.INTER_NEAREST)
-        
-        pixelated = global_img.copy()
-        pixelated[start_h:start_h+center_size, start_w:start_w+center_size] = center_img
-        
-        # Apply same threshold masking
-        transparency_mask = apply_threshold_mask(combined_heatmap)
+        # Apply threshold masking
+        transparency_mask = apply_threshold_mask(heatmap)
         
         black_bg = np.zeros_like(pixelated)
         bottom_right = pixelated * transparency_mask[..., None] + black_bg * (1 - transparency_mask[..., None])
@@ -633,7 +515,7 @@ def create_stacked_comparison_video(results, save_path, config=VIDEO_CONFIG, glo
         top = np.hstack([original, top_right])
         bottom = np.hstack([bottom_left, bottom_right])
         return np.vstack([top, bottom])
-    
+
     # Initialize video writer
     output_height = config['OUTPUT_HEIGHT']
     output_width = config['OUTPUT_WIDTH']
@@ -663,8 +545,6 @@ def create_stacked_comparison_video(results, save_path, config=VIDEO_CONFIG, glo
     
     print("\nVideo creation complete!")
     out.release()
-
-
 
 def create_calibration_window(image_path, visualizer, global_min, global_max):
     def on_trackbar(x):
@@ -776,7 +656,7 @@ def main():
         
         # Process all images first with global normalization
         print("Processing images...")
-        results, global_bounds, center_bounds = process_batch(visualizer, image_files)
+        results, (global_min, global_max) = process_batch(visualizer, image_files)
         
         # Create combined heatmap video
         print("Creating combined heatmap video...")
@@ -784,8 +664,8 @@ def main():
         create_combined_heatmap_video(
             results, 
             combined_path,
-            global_min=global_bounds[0],
-            global_max=global_bounds[1]
+            global_min=global_min,
+            global_max=global_max
         )
         
         
@@ -799,16 +679,14 @@ def main():
         create_stacked_comparison_video(
             results, 
             stacked_path, 
-            global_min=global_bounds[0], 
-            global_max=global_bounds[1],
-            #mask_threshold=0.4,  # Adjust these values to control transparency
-            #mask_contrast=7.5    # Higher = sharper transition
+            global_min=global_min, 
+            global_max=global_max
         )
         
         # Create transparent overlay video
         print("Creating transparent overlay video...")
         transparent_path = save_dir / "transparent_overlay.mp4"
-        create_transparent_overlay_video(results, transparent_path, global_min=global_bounds[0], global_max=global_bounds[1])
+        create_transparent_overlay_video(results, transparent_path, global_min=global_min, global_max=global_max)
         
         print(f"Videos saved to {save_dir}")
         

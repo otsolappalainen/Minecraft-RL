@@ -17,9 +17,9 @@ import os
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
-MAX_EPISODE_STEPS = 1024
+MAX_EPISODE_STEPS = 4096
 STEP_PENALTY = -0.1
-HEALTH_LOSS_PENALTY = -5
+HEALTH_LOSS_PENALTY = -2.1
 DEATH_PENALTY = -10.0
 TIMEOUT_STEP_LONG = 30
 TIMEOUT_STATE = 30
@@ -285,21 +285,6 @@ class MinecraftEnv(gym.Env):
             if not hasattr(self, 'previous_health'):
                 self.previous_health = health
 
-            # Reward if the agent turns towards valuable target
-            if self.prev_surrounding_blocks is not None:
-                prev_hi = self.get_highest_value_index(self.prev_surrounding_blocks)
-                new_hi = self.get_highest_value_index(surrounding_blocks_norm)
-                directional_reward = self.calculate_directional_reward(prev_hi, new_hi, action_name, mobs_norm)
-                reward += directional_reward
-                self.total_directional_reward += directional_reward
-
-            self.prev_surrounding_blocks = surrounding_blocks_norm.copy()
-
-            # Reward if the agent looks directly at the mob
-            if self.had_mob == False and mobs_norm[0] == 1.0:
-                reward += 0.5
-                self.total_mob_appear_reward += 0.5
-
 
             # Track health/death penalties
             if health < self.previous_health:
@@ -311,15 +296,6 @@ class MinecraftEnv(gym.Env):
             if not alive:
                 reward += DEATH_PENALTY
                 self.total_death_penalty += DEATH_PENALTY
-
-            # Reward if the agent attacks a mob and bonus if the agent doesnt get hit in return
-            if self.had_mob and action_name == "attack 2":
-                if self.health_history.count(True) == 0:
-                    reward += 2.5
-                    self.total_valid_attack_penalty += 2.5
-                else:
-                    reward += 0.5
-                    self.total_valid_attack_penalty += 0.5
 
             # Save looking at mob status
             if mobs_norm[0] == 1.0:
@@ -338,14 +314,9 @@ class MinecraftEnv(gym.Env):
                 reward += 2.0
                 self.total_hit_reward += 2.0
 
-            current_closest = np.max(surrounding_blocks_norm)
-            # Reward for keeping distance to mobs
-            if self.last_closest == 1.0 and current_closest < 1.0:
-                reward += 2.0
-                self.total_block_removed_reward += 2.0
-            self.last_closest = current_closest
 
             self.previous_health = health
+
             if self.steps == 0:
                 reward = np.clip(reward, -0.5, 0.5)
 
