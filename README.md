@@ -4,6 +4,12 @@ A deep reinforcement learning system that trains an AI agent to play Minecraft u
 
 ## System Overview
 
+
+### Short overview (https://youtu.be/6ekARYFlnS0?si=fHAi_K13IToaWRCv)
+[![Short overview](thumbnail.png)](https://www.youtube.com/watch?v=6ekARYFlnS0)
+
+
+
 ### Components
 1. **Minecraft Mod** ([minecraft_client](./minecraft_client))
    - WebSocket server for receiving commands
