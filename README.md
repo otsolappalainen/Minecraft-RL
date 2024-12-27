@@ -6,7 +6,7 @@ A deep reinforcement learning system that trains an AI agent to play Minecraft u
 
 
 ### Short overview (youtube)
-[![Short overview](thumbnail.jpg)](https://www.youtube.com/watch?v=6ekARYFlnS0)
+[![Short overview](thumbnail.png)](https://www.youtube.com/watch?v=6ekARYFlnS0)
 
 
 
